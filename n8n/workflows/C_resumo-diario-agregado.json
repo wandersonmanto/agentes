@@ -1,0 +1,137 @@
+{
+  "name": "margem - resumo diario agregado",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 8 * * 1-6"
+            }
+          ]
+        }
+      },
+      "id": "schedule-0830",
+      "name": "Schedule 08:30 seg-sáb",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [120, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "collection": "users",
+        "returnAll": true
+      },
+      "id": "firestore-users",
+      "name": "Firestore: users",
+      "type": "n8n-nodes-base.googleFirestore",
+      "typeVersion": 1,
+      "position": [340, 300],
+      "credentials": {
+        "googleFirestoreOAuth2Api": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_FIREBASE",
+          "name": "Firebase Service Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filtra diretores/supervisores com 'margem' em agentes e whatsapp válido\nreturn items\n  .map(it => ({\n    json: {\n      email_login: it.json.id || it.json.email_login,\n      nome:        it.json.nome,\n      funcao:      it.json.funcao,\n      agentes:     it.json.agentes,\n      whatsapp:    String(it.json.whatsapp || '').trim(),\n    }\n  }))\n  .filter(it => {\n    const d = it.json;\n    return ['diretor','supervisor'].includes(d.funcao)\n      && Array.isArray(d.agentes) && d.agentes.includes('margem')\n      && d.whatsapp && d.whatsapp !== '0' && d.whatsapp.length > 5;\n  });"
+      },
+      "id": "filter-direcao",
+      "name": "Filtrar direção/supervisão",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [560, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "vw_margem_resumo_por_responsavel",
+        "returnAll": true
+      },
+      "id": "supabase-agregado",
+      "name": "View agregada (todos)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [780, 300],
+      "credentials": {
+        "supabaseApi": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_SUPABASE",
+          "name": "Supabase agentes"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Monta o texto consolidado a partir dos resultados da view\nconst linhas = $items('View agregada (todos)').map(i => i.json);\nconst total_pend = linhas.reduce((a, r) => a + Number(r.pendentes || 0), 0);\nconst total_cien = linhas.reduce((a, r) => a + Number(r.cientes   || 0), 0);\n\nconst top5 = linhas\n  .sort((a, b) => Number(b.pendentes || 0) - Number(a.pendentes || 0))\n  .slice(0, 5)\n  .map(r => `• ${r.usuario_nome}: *${r.pendentes}* pendentes (${r.cientes} cientes)`)\n  .join('\\n');\n\nconst texto = `📉 *Resumo Margem Negativa*\\n\\n` +\n  `Total pendentes: *${total_pend}*\\n` +\n  `Total cientes: ${total_cien}\\n\\n` +\n  `*Top 5 com mais pendentes:*\\n${top5 || '(nenhum pendente)'}\\n\\n` +\n  `Acesse: http://margem.interno/agente/margem`;\n\n// Dispara um item por destinatário (diretor/supervisor filtrado anteriormente)\nconst destinatarios = $items('Filtrar direção/supervisão').map(i => i.json);\nreturn destinatarios.map(d => ({\n  json: { phone: d.whatsapp, nome: d.nome, message: texto }\n}));"
+      },
+      "id": "build-message",
+      "name": "Montar mensagem agregada",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.EVOLUTION_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "apikey",       "value": "={{$env.EVOLUTION_KEY}}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $json.phone }}\",\n  \"text\":   \"{{ $json.message }}\"\n}",
+        "options": {}
+      },
+      "id": "evolution-send",
+      "name": "Evolution: enviar WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1220, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "notificacoes_log",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "agente_id", "fieldValue": "f357e8b2-0169-4cff-85d7-9100746df563" },
+            { "fieldId": "tipo",      "fieldValue": "resumo_diario_agregado" },
+            { "fieldId": "canal",     "fieldValue": "whatsapp" },
+            { "fieldId": "destino",   "fieldValue": "={{ $('Montar mensagem agregada').item.json.phone }}" },
+            { "fieldId": "sucesso",   "fieldValue": "={{ $json.statusCode == null || $json.statusCode < 400 }}" }
+          ]
+        }
+      },
+      "id": "log-notif",
+      "name": "Log notificação",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1440, 300],
+      "credentials": {
+        "supabaseApi": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_SUPABASE",
+          "name": "Supabase agentes"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule 08:30 seg-sáb":  { "main": [[{ "node": "Firestore: users",       "type": "main", "index": 0 }]] },
+    "Firestore: users":        { "main": [[{ "node": "Filtrar direção/supervisão", "type": "main", "index": 0 }]] },
+    "Filtrar direção/supervisão": { "main": [[{ "node": "View agregada (todos)", "type": "main", "index": 0 }]] },
+    "View agregada (todos)":   { "main": [[{ "node": "Montar mensagem agregada", "type": "main", "index": 0 }]] },
+    "Montar mensagem agregada": { "main": [[{ "node": "Evolution: enviar WhatsApp", "type": "main", "index": 0 }]] },
+    "Evolution: enviar WhatsApp": { "main": [[{ "node": "Log notificação",     "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

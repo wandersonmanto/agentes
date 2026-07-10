@@ -1,0 +1,31 @@
+{
+  "name": "margem-negativa-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "vitest run",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "axios": "^1.7.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-async-errors": "^3.1.1",
+    "firebase-admin": "^12.4.0",
+    "helmet": "^7.1.0",
+    "node-cron": "^3.0.3",
+    "pino": "^9.4.0",
+    "pino-http": "^10.3.0",
+    "pino-pretty": "^11.2.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "eslint": "^9.10.0",
+    "vitest": "^2.1.0"
+  }
+}

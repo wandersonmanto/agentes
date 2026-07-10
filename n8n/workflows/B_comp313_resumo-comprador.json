@@ -1,0 +1,202 @@
+{
+  "name": "comparativo313 - resumo diario comprador",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 9 * * 1-6" }
+          ]
+        }
+      },
+      "id": "schedule-09h",
+      "name": "Schedule 09:00 seg-sáb",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1400, 200]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "collection": "users",
+        "returnAll": true
+      },
+      "id": "firestore-users",
+      "name": "Firestore: users",
+      "type": "n8n-nodes-base.googleFirestore",
+      "typeVersion": 1,
+      "position": [-1200, 200],
+      "credentials": {
+        "googleFirestoreOAuth2Api": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_FIREBASE",
+          "name": "Firebase Service Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Destinatários do agente comparativo313 — somente compradores:\n//   - funcao === 'comprador'\n//   - 'comparativo313' no array `agentes` (Firestore users)\n//   - whatsapp válido (não vazio, não '0', mais de 5 chars)\nreturn items\n  .map(it => ({\n    json: {\n      email_login: (it.json.id || it.json.email_login || '').toLowerCase(),\n      nome:        it.json.nome,\n      funcao:      it.json.funcao,\n      agentes:     it.json.agentes,\n      whatsapp:    String(it.json.whatsapp || '').trim(),\n    }\n  }))\n  .filter(it => {\n    const d = it.json;\n    return d.funcao === 'comprador'\n      && Array.isArray(d.agentes) && d.agentes.includes('comparativo313')\n      && d.whatsapp && d.whatsapp !== '0' && d.whatsapp.length > 5\n      && d.email_login;\n  });"
+      },
+      "id": "filter-compradores",
+      "name": "Filtrar compradores",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1000, 200]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "vw_comparativo313_resumo_responsavel",
+        "returnAll": true
+      },
+      "id": "supabase-resumo-resp",
+      "name": "Supabase: resumo por responsavel",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-800, 200],
+      "credentials": {
+        "supabaseApi": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_SUPABASE",
+          "name": "Supabase agentes"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "vw_comparativo313_resumo_filial_comprador",
+        "returnAll": true
+      },
+      "id": "supabase-resumo-fil-comp",
+      "name": "Supabase: drill por filial",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-600, 200],
+      "credentials": {
+        "supabaseApi": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_SUPABASE",
+          "name": "Supabase agentes"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Cruza compradores com (a) o resumo agregado por responsável e\n// (b) o drill por filial. Sai 1 item por comprador com seus dados.\nconst compradores = $('Filtrar compradores').all().map(it => it.json);\nconst resumoResp  = $('Supabase: resumo por responsavel').all().map(it => it.json);\nconst drill       = $('Supabase: drill por filial').all().map(it => it.json);\n\nfunction matchByEmail(arr, email) {\n  if (!email) return null;\n  return arr.find(r => String(r.usuario_email_login || '').toLowerCase() === email) || null;\n}\n\nreturn compradores.map(c => {\n  const resumo = matchByEmail(resumoResp, c.email_login);\n  const porFilial = resumo\n    ? drill.filter(d => String(d.usuario_id) === String(resumo.usuario_id))\n           .filter(d => Number(d.rupturas_pendentes || 0) > 0)\n           .sort((a, b) => Number(b.rupturas_pendentes) - Number(a.rupturas_pendentes))\n    : [];\n  return {\n    json: {\n      email_login: c.email_login,\n      nome:        c.nome,\n      whatsapp:    c.whatsapp,\n      rupturas_pendentes: Number(resumo?.rupturas_pendentes || 0),\n      filiais_afetadas:   Number(resumo?.filiais_afetadas || 0),\n      por_filial: porFilial,\n    }\n  };\n});"
+      },
+      "id": "join-comprador",
+      "name": "Resolver dados do comprador",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-380, 200]
+    },
+    {
+      "parameters": { "batchSize": 1, "options": {} },
+      "id": "loop",
+      "name": "Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-160, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "tem-ruptura",
+              "leftValue": "={{ $json.rupturas_pendentes }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-tem-ruptura",
+      "name": "Tem ruptura?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [60, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mensagem do comprador — totais + breakdown por filial (top 5).\nconst u = $input.first().json;\n\nfunction num(v) {\n  if (v == null) return '—';\n  return Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 0 });\n}\n\nconst total      = u.rupturas_pendentes;\nconst filiais    = u.filiais_afetadas;\nconst porFilial  = (u.por_filial || []).slice(0, 5);\n\nconst linhasFiliais = porFilial.length\n  ? porFilial.map(f => `   • *${f.filial_cod}* — ${num(f.rupturas_pendentes)} ruptura(s)`).join('\\n')\n  : '';\n\nconst maisRecente = (u.por_filial || []).reduce((acc, f) => {\n  const d = f.ultima_deteccao ? new Date(f.ultima_deteccao).getTime() : 0;\n  return d > acc ? d : acc;\n}, 0);\nconst dataDeteccao = maisRecente ? new Date(maisRecente).toLocaleDateString('pt-BR') : '';\n\nconst link = $env.APP_URL_COMP313 || 'http://margem.interno/agente/comparativo313';\n\nconst topInfo  = porFilial.length\n  ? `\\n\\nPrincipais filiais com ruptura:\\n${linhasFiliais}`\n  : '';\nconst extras = (u.por_filial || []).length > porFilial.length\n  ? `\\n   …e mais ${u.por_filial.length - porFilial.length} filial(is).`\n  : '';\n\nconst message = `Olá, *${u.nome}*!\\n\\nResumo *Comparativo 313* — depósito 313 tem estoque que está em falta na loja para as suas seções:\\n\\nVocê tem *${num(total)}* ruptura(s) abertas em ${num(filiais)} filial(is).${topInfo}${extras}${dataDeteccao ? `\\n\\n_Última detecção: ${dataDeteccao}_` : ''}\\n\\nAcesse: ${link}`;\n\nreturn [{\n  json: {\n    phone:       u.whatsapp,\n    message,\n    email_login: u.email_login,\n  }\n}];"
+      },
+      "id": "build-message",
+      "name": "Montar mensagem",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [280, 140]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.EVOLUTION_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "apikey",        "value": "={{$env.EVOLUTION_KEY}}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $json.phone }}\",\n  \"text\":   \"{{ $json.message }}\"\n}",
+        "options": {}
+      },
+      "id": "evolution-send",
+      "name": "Evolution: enviar WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 140]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "notificacoes_log",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "agente_id",       "fieldValue": "TROCAR_PELO_UUID_DO_AGENTE_COMPARATIVO313" },
+            { "fieldId": "tipo",            "fieldValue": "resumo_diario_comprador" },
+            { "fieldId": "canal",           "fieldValue": "whatsapp" },
+            { "fieldId": "destino",         "fieldValue": "={{ $('Montar mensagem').item.json.phone }}" },
+            { "fieldId": "sucesso",         "fieldValue": "={{ $json.statusCode == null || $json.statusCode < 400 }}" }
+          ]
+        }
+      },
+      "id": "log-notif",
+      "name": "Log notificação",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [720, 140],
+      "credentials": {
+        "supabaseApi": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_SUPABASE",
+          "name": "Supabase agentes"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule 09:00 seg-sáb":               { "main": [[{ "node": "Firestore: users",                  "type": "main", "index": 0 }]] },
+    "Firestore: users":                     { "main": [[{ "node": "Filtrar compradores",               "type": "main", "index": 0 }]] },
+    "Filtrar compradores":                  { "main": [[{ "node": "Supabase: resumo por responsavel",  "type": "main", "index": 0 }]] },
+    "Supabase: resumo por responsavel":     { "main": [[{ "node": "Supabase: drill por filial",        "type": "main", "index": 0 }]] },
+    "Supabase: drill por filial":           { "main": [[{ "node": "Resolver dados do comprador",       "type": "main", "index": 0 }]] },
+    "Resolver dados do comprador":          { "main": [[{ "node": "Loop",                              "type": "main", "index": 0 }]] },
+    "Loop":                                 { "main": [[{ "node": "Tem ruptura?",                      "type": "main", "index": 0 }]] },
+    "Tem ruptura?":                         { "main": [
+      [{ "node": "Montar mensagem", "type": "main", "index": 0 }],
+      [{ "node": "Loop",            "type": "main", "index": 0 }]
+    ]},
+    "Montar mensagem":                      { "main": [[{ "node": "Evolution: enviar WhatsApp", "type": "main", "index": 0 }]] },
+    "Evolution: enviar WhatsApp":           { "main": [[{ "node": "Log notificação",            "type": "main", "index": 0 }]] },
+    "Log notificação":                      { "main": [[{ "node": "Loop",                       "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

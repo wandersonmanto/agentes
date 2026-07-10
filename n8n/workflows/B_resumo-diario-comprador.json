@@ -1,0 +1,198 @@
+{
+  "name": "margem - resumo diario comprador",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1-6"
+            }
+          ]
+        }
+      },
+      "id": "schedule-08h",
+      "name": "Schedule 08:00 seg-sáb",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [120, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "collection": "users",
+        "returnAll": true
+      },
+      "id": "firestore-users",
+      "name": "Firestore: users",
+      "type": "n8n-nodes-base.googleFirestore",
+      "typeVersion": 1,
+      "position": [340, 300],
+      "credentials": {
+        "googleFirestoreOAuth2Api": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_FIREBASE",
+          "name": "Firebase Service Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filtra compradores com 'margem' em agentes e whatsapp válido\nreturn items\n  .map(it => ({\n    json: {\n      email_login: it.json.id || it.json.email_login,\n      nome:        it.json.nome,\n      funcao:      it.json.funcao,\n      agentes:     it.json.agentes,\n      whatsapp:    String(it.json.whatsapp || '').trim(),\n    }\n  }))\n  .filter(it => {\n    const d = it.json;\n    return d.funcao === 'comprador'\n      && Array.isArray(d.agentes) && d.agentes.includes('margem')\n      && d.whatsapp && d.whatsapp !== '0' && d.whatsapp.length > 5;\n  });"
+      },
+      "id": "filter-compradores",
+      "name": "Filtrar compradores ativos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [560, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop",
+      "name": "Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [780, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "vw_margem_resumo_por_responsavel",
+        "returnAll": true,
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "usuario_email_login",
+              "condition": "eq",
+              "keyValue": "={{$json.email_login}}"
+            },
+            {
+              "keyName": "usuario_papel",
+              "condition": "eq",
+              "keyValue": "comprador"
+            }
+          ]
+        }
+      },
+      "id": "supabase-stats",
+      "name": "Stats do comprador",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1000, 300],
+      "credentials": {
+        "supabaseApi": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_SUPABASE",
+          "name": "Supabase agentes"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "tem-pendentes",
+              "leftValue": "={{$json.pendentes}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-pendentes",
+      "name": "Tem pendentes?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const stats   = $input.first().json;\nconst usuario = $('Loop').item.json;\nconst nome    = stats.usuario_nome;\nconst pend    = stats.pendentes;\nconst total   = stats.total;\n\nreturn [{\n  json: {\n    phone:    usuario.whatsapp,\n    message:  `Olá, *${nome}*!\\n\\nVocê tem *${pend}* produto(s) com margem negativa aguardando ciência (de um total de ${total}).\\n\\nAcesse: http://margem.interno/agente/margem`,\n    usuario_id: stats.usuario_id,\n  }\n}];"
+      },
+      "id": "build-message",
+      "name": "Montar mensagem",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.EVOLUTION_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "apikey",        "value": "={{$env.EVOLUTION_KEY}}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $json.phone }}\",\n  \"text\":   \"{{ $json.message }}\"\n}",
+        "options": {}
+      },
+      "id": "evolution-send",
+      "name": "Evolution: enviar WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1660, 220]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "notificacoes_log",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "agente_id",       "fieldValue": "f357e8b2-0169-4cff-85d7-9100746df563" },
+            { "fieldId": "destinatario_id", "fieldValue": "={{ $('Montar mensagem').item.json.usuario_id }}" },
+            { "fieldId": "tipo",            "fieldValue": "resumo_diario_comprador" },
+            { "fieldId": "canal",           "fieldValue": "whatsapp" },
+            { "fieldId": "destino",         "fieldValue": "={{ $('Montar mensagem').item.json.phone }}" },
+            { "fieldId": "sucesso",         "fieldValue": "={{ $json.statusCode == null || $json.statusCode < 400 }}" }
+          ]
+        }
+      },
+      "id": "log-notif",
+      "name": "Log notificação",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1880, 220],
+      "credentials": {
+        "supabaseApi": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_SUPABASE",
+          "name": "Supabase agentes"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule 08:00 seg-sáb": { "main": [[{ "node": "Firestore: users",         "type": "main", "index": 0 }]] },
+    "Firestore: users":       { "main": [[{ "node": "Filtrar compradores ativos", "type": "main", "index": 0 }]] },
+    "Filtrar compradores ativos": { "main": [[{ "node": "Loop",                "type": "main", "index": 0 }]] },
+    "Loop":                   { "main": [[{ "node": "Stats do comprador",      "type": "main", "index": 0 }]] },
+    "Stats do comprador":     { "main": [[{ "node": "Tem pendentes?",          "type": "main", "index": 0 }]] },
+    "Tem pendentes?":         { "main": [
+      [{ "node": "Montar mensagem", "type": "main", "index": 0 }],
+      [{ "node": "Loop",            "type": "main", "index": 0 }]
+    ]},
+    "Montar mensagem":        { "main": [[{ "node": "Evolution: enviar WhatsApp", "type": "main", "index": 0 }]] },
+    "Evolution: enviar WhatsApp": { "main": [[{ "node": "Log notificação",     "type": "main", "index": 0 }]] },
+    "Log notificação":        { "main": [[{ "node": "Loop",                    "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

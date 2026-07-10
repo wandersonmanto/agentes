@@ -1,0 +1,195 @@
+{
+  "name": "supervisor_estoque — ingestão histórica (Etapa 1)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Supervisor de Estoque — Ingestão Histórica",
+        "formDescription": "Faça upload de UMA planilha (arquivo-gerado-DD-MM-AAAA-HH-MM-SS.xlsx). A data do snapshot é extraída do nome do arquivo.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Planilha do dia",
+              "fieldType": "file",
+              "acceptFileTypes": ".xlsx",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "trg-form",
+      "name": "Form: upload planilha",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [-1600, 0],
+      "webhookId": "supest-historico-form"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {
+          "headerRow": true,
+          "readAsString": true
+        }
+      },
+      "id": "extract-xlsx",
+      "name": "Extract XLSX",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [-1360, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =========================================================\n// Normaliza linhas do XLSX para o formato esperado pelo RPC\n// fn_supest_ingest_snapshots.\n//   - extrai snapshot_date do filename\n//   - mapeia colunas Excel -> campos do RPC\n//   - mantém valores como string (RPC faz parse PT-BR)\n// =========================================================\n\nconst filename =\n  $('Form: upload planilha').first().binary?.['Planilha do dia']?.fileName\n  || $('Form: upload planilha').first().json.fileName\n  || '';\n\nconst m = filename.match(/arquivo-gerado-(\\d{2})-(\\d{2})-(\\d{4})/);\nif (!m) {\n  throw new Error('Não consegui extrair a data do nome do arquivo: ' + filename);\n}\nconst snapshot_date = `${m[3]}-${m[2]}-${m[1]}`;  // YYYY-MM-DD\n\nconst COLMAP = {\n  'FILIAL':            'filial',\n  'TIPO':              'tipo',\n  'SETOR':             'setor',\n  'DEPARTAMENTO':      'departamento',\n  'SECAO':             'secao',\n  'FORNECEDOR':        'fornecedor',\n  'Grade Secao':       'grade',\n  'Grade Extra':       'grade_extra',\n  'Qtd Estoque':       'estoque',\n  'Vlr. Estoque R$':   'vlr_estoque',\n  'Qtd Reservado':     'qtd_reservado',\n  'Qtd Transito CD':   'qtd_transito_cd',\n  'Qtd Est Total':     'qtd_estoque_total',\n  'Qtde Total Vendas': 'quant_vendas',\n  'Qtd Media Dia':     'media_dia',\n  'Qtd Movimentos':    'quant_movimentos',\n  'QTDDIASMOV':        'dias_venda',\n  'Qtd Maximo':        'maximo',\n  'Dt. Ult. Ent.':     'ultima_entrada',\n  'Dt. Ult. Sai':      'ultima_saida',\n  'MIX':               'mix',\n  'QTDDIAS':           'giro',\n};\n\nfunction splitProduto(v) {\n  if (v == null) return [null, null];\n  const s = String(v);\n  const mm = s.match(/^(\\d+)\\s*-\\s*(.*)$/);\n  if (!mm) return [s, null];\n  return [mm[1], mm[2].trim()];\n}\n\nfunction toStr(v) {\n  if (v == null) return null;\n  if (typeof v === 'string') return v;\n  return String(v);\n}\n\nconst out = [];\nfor (const it of items) {\n  const row = it.json;\n  const rec = { snapshot_date };\n  for (const [excel, target] of Object.entries(COLMAP)) {\n    rec[target] = toStr(row[excel]);\n  }\n  const [codigo, desc] = splitProduto(row['PRODUTO']);\n  rec.codigo_produto = codigo;\n  rec.descricao_produto = desc;\n  if (rec.codigo_produto && rec.filial) out.push({ json: rec });\n}\nreturn out;"
+      },
+      "id": "normalize",
+      "name": "Normalizar linhas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1120, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Agrupa as linhas em pacotes de 1000 (1 item de saída = 1 pacote)\nconst CHUNK = 1000;\nconst all = items.map(i => i.json);\nconst chunks = [];\nfor (let i = 0; i < all.length; i += CHUNK) {\n  chunks.push({\n    json: {\n      lote: Math.floor(i / CHUNK) + 1,\n      total_lotes: Math.ceil(all.length / CHUNK),\n      total_linhas: all.length,\n      snapshot_date: all[0]?.snapshot_date,\n      rows: all.slice(i, i + CHUNK),\n    }\n  });\n}\nreturn chunks;"
+      },
+      "id": "chunk",
+      "name": "Em lotes de 1000",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-880, 0]
+    },
+    {
+      "parameters": {
+        "tableId": "agente_execucoes",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "agente_id",    "fieldValue": "={{ $('Get agente_id').first().json.id }}" },
+            { "fieldId": "status",       "fieldValue": "rodando" },
+            { "fieldId": "origem",       "fieldValue": "n8n.ingestao_historica" }
+          ]
+        }
+      },
+      "id": "exec-start",
+      "name": "Execução: rodando",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-880, 200],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "agentes",
+        "returnAll": false,
+        "filters": {
+          "conditions": [
+            { "keyName": "slug", "condition": "eq", "keyValue": "supervisor_estoque" }
+          ]
+        }
+      },
+      "id": "get-agente",
+      "name": "Get agente_id",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-1120, 200],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "options": { "reset": false }
+      },
+      "id": "loop",
+      "name": "Loop lotes",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-640, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL}}/rest/v1/rpc/fn_supest_ingest_snapshots",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}" },
+            { "name": "Authorization", "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_origem\": \"excel\",\n  \"p_rows\":   {{ JSON.stringify($json.rows) }}\n}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "rpc-ingest",
+      "name": "RPC: ingest lote",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-400, -16]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Soma os contadores devolvidos pelo RPC a cada lote\nconst execId = $('Execução: rodando').first().json.id;\nconst stats = items.reduce((acc, it) => {\n  const r = Array.isArray(it.json) ? it.json[0] : it.json;\n  acc.inserted += Number(r.inserted_count || 0);\n  acc.updated  += Number(r.updated_count  || 0);\n  return acc;\n}, { inserted: 0, updated: 0 });\nreturn [{ json: { execId, ...stats } }];"
+      },
+      "id": "agg",
+      "name": "Agregar resultados",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 0]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "agente_execucoes",
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            { "keyName": "id", "condition": "eq", "keyValue": "={{ $json.execId }}" }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "status",      "fieldValue": "sucesso" },
+            { "fieldId": "finished_at", "fieldValue": "={{ $now.toISO() }}" },
+            { "fieldId": "metricas",    "fieldValue": "={{ JSON.stringify({ inseridos: $json.inserted, atualizados: $json.updated }) }}" }
+          ]
+        }
+      },
+      "id": "exec-done",
+      "name": "Execução: sucesso",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [80, 0]
+    },
+    {
+      "parameters": {
+        "content": "## supervisor_estoque — Ingestão Histórica (Etapa 1)\n\nDispare 1× por dia que você tem no histórico.\n\n**Fluxo:** upload XLSX → parse → chunks de 1.000 → RPC `fn_supest_ingest_snapshots('excel', rows)` → upsert idempotente em `supervisor_estoque_snapshots`.\n\n**Idempotente:** se reenviar a mesma planilha, atualiza ao invés de duplicar (UNIQUE em snapshot_date+filial_cod+codigo_produto).\n\n**Datas:** extraídas do filename `arquivo-gerado-DD-MM-AAAA-HH-MM-SS.xlsx`.\n\n**Env vars necessárias:**\n- `SUPABASE_URL` = https://mscbjlvcqyunuyswiaqr.supabase.co\n- `SUPABASE_SERVICE_ROLE_KEY` = (service_role key do projeto agentes)",
+        "height": 220,
+        "width": 480
+      },
+      "id": "note",
+      "name": "Como usar",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-1600, -300]
+    }
+  ],
+  "connections": {
+    "Form: upload planilha":   { "main": [[{ "node": "Extract XLSX",      "type": "main", "index": 0 }]] },
+    "Extract XLSX":            { "main": [[{ "node": "Normalizar linhas", "type": "main", "index": 0 }]] },
+    "Normalizar linhas":       { "main": [[{ "node": "Em lotes de 1000", "type": "main", "index": 0 }, { "node": "Get agente_id", "type": "main", "index": 0 }]] },
+    "Get agente_id":           { "main": [[{ "node": "Execução: rodando", "type": "main", "index": 0 }]] },
+    "Em lotes de 1000":        { "main": [[{ "node": "Loop lotes", "type": "main", "index": 0 }]] },
+    "Execução: rodando":       { "main": [[{ "node": "Loop lotes", "type": "main", "index": 0 }]] },
+    "Loop lotes":              { "main": [[{ "node": "Agregar resultados", "type": "main", "index": 0 }], [{ "node": "RPC: ingest lote", "type": "main", "index": 0 }]] },
+    "RPC: ingest lote":        { "main": [[{ "node": "Loop lotes", "type": "main", "index": 0 }]] },
+    "Agregar resultados":      { "main": [[{ "node": "Execução: sucesso", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "active": false,
+  "tags": []
+}

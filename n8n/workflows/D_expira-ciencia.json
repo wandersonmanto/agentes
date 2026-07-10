@@ -1,0 +1,45 @@
+{
+  "name": "margem - expira ciencia (00:00)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-meianoite",
+      "name": "Schedule 00:00 diário",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [120, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update margem_produtos\n   set status           = 'pendente',\n       motivo           = null,\n       observacao       = null,\n       data_fim_ciencia = null,\n       ciencia_por_id   = null,\n       checked_at       = null\n where status = 'ciente'\n   and data_fim_ciencia < current_date\nreturning id;"
+      },
+      "id": "supabase-expira",
+      "name": "UPDATE expira ciencias",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [340, 300],
+      "credentials": {
+        "postgres": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_POSTGRES_SUPABASE",
+          "name": "Postgres Supabase (direct)"
+        }
+      },
+      "notes": "Se preferir não criar credencial Postgres separada, use o nó Supabase com o RPC equivalente."
+    }
+  ],
+  "connections": {
+    "Schedule 00:00 diário": { "main": [[{ "node": "UPDATE expira ciencias", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

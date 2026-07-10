@@ -1,0 +1,182 @@
+{
+  "name": "comparativo313 - resumo diario diretor/supervisor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "10 9 * * 1-6" }
+          ]
+        }
+      },
+      "id": "schedule-09h10",
+      "name": "Schedule 09:10 seg-sáb",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1400, 200]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "collection": "users",
+        "returnAll": true
+      },
+      "id": "firestore-users",
+      "name": "Firestore: users",
+      "type": "n8n-nodes-base.googleFirestore",
+      "typeVersion": 1,
+      "position": [-1200, 200],
+      "credentials": {
+        "googleFirestoreOAuth2Api": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_FIREBASE",
+          "name": "Firebase Service Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Destinatários: diretor + supervisor com 'comparativo313' em agentes.\n// Preserva `loja` (string \"todas\" ou array) — usado no nó de visibilidade.\nreturn items\n  .map(it => ({\n    json: {\n      email_login: (it.json.id || it.json.email_login || '').toLowerCase(),\n      nome:        it.json.nome,\n      funcao:      it.json.funcao,\n      agentes:     it.json.agentes,\n      whatsapp:    String(it.json.whatsapp || '').trim(),\n      loja:        it.json.loja,\n    }\n  }))\n  .filter(it => {\n    const d = it.json;\n    return ['diretor', 'supervisor'].includes(d.funcao)\n      && Array.isArray(d.agentes) && d.agentes.includes('comparativo313')\n      && d.whatsapp && d.whatsapp !== '0' && d.whatsapp.length > 5\n      && d.email_login;\n  });"
+      },
+      "id": "filter-diretor",
+      "name": "Filtrar diretor/supervisor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1000, 200]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "vw_comparativo313_resumo_filial",
+        "returnAll": true
+      },
+      "id": "supabase-resumo",
+      "name": "Supabase: resumo todas filiais",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-800, 200],
+      "credentials": {
+        "supabaseApi": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_SUPABASE",
+          "name": "Supabase agentes"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resolve visibilidade por usuário (igual ao B_metas):\n//   - users/{email}.loja = \"todas\" (string ou item de array) → wildcard\n//   - array de strings → filtra por essas filiais\n//   - vazio → não vê nada\nconst usuarios   = $('Filtrar diretor/supervisor').all().map(it => it.json);\nconst resumoTodo = $('Supabase: resumo todas filiais').all().map(it => it.json);\n\nconst SENTINEL = 'todas';\nfunction extraiCod(raw) {\n  if (raw == null) return null;\n  const s = String(raw).trim();\n  if (!s) return null;\n  const m = s.match(/^(\\d+)/);\n  return m ? m[1] : s.toLowerCase();\n}\nfunction resolveLojas(lojaRaw) {\n  if (typeof lojaRaw === 'string' && lojaRaw.trim().toLowerCase() === SENTINEL) {\n    return { wildcard: true, filiais: [] };\n  }\n  const arr = Array.isArray(lojaRaw)\n    ? lojaRaw\n    : (lojaRaw == null || lojaRaw === '' ? [] : [lojaRaw]);\n  if (arr.some(x => String(x).trim().toLowerCase() === SENTINEL)) {\n    return { wildcard: true, filiais: [] };\n  }\n  const filiais = arr.map(extraiCod).filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);\n  return { wildcard: false, filiais };\n}\n\nreturn usuarios.map(u => {\n  const { wildcard, filiais } = resolveLojas(u.loja);\n  const resumo = wildcard\n    ? resumoTodo\n    : resumoTodo.filter(r => filiais.includes(String(r.filial_cod)));\n  return {\n    json: {\n      email_login: u.email_login,\n      nome:        u.nome,\n      whatsapp:    u.whatsapp,\n      funcao:      u.funcao,\n      wildcard,\n      filiais,\n      resumo,\n    }\n  };\n});"
+      },
+      "id": "resolver-visibilidade",
+      "name": "Resolver visibilidade",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-580, 200]
+    },
+    {
+      "parameters": { "batchSize": 1, "options": {} },
+      "id": "loop",
+      "name": "Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-360, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "tem-ruptura",
+              "leftValue": "={{ ($json.resumo || []).reduce((s, r) => s + Number(r.rupturas_pendentes || 0), 0) }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-tem-ruptura",
+      "name": "Tem ruptura?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-140, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mensagem do diretor/supervisor:\n//   - lista TODAS as filiais com ruptura > 0\n//   - ordenadas por número de rupturas (desc)\n//   - inclui totais consolidados\nconst u = $input.first().json;\n\nfunction num(v) {\n  if (v == null) return '—';\n  return Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 0 });\n}\n\nconst filiaisComRuptura = (u.resumo || [])\n  .filter(r => Number(r.rupturas_pendentes || 0) > 0)\n  .sort((a, b) => Number(b.rupturas_pendentes) - Number(a.rupturas_pendentes));\n\nconst totalRupturas = filiaisComRuptura.reduce((s, r) => s + Number(r.rupturas_pendentes || 0), 0);\nconst totalEstoque  = filiaisComRuptura.reduce((s, r) => s + Number(r.estoque_total_deposito || 0), 0);\n\nconst linhas = filiaisComRuptura.map(r => {\n  const desc = r.filial_desc ? r.filial_desc.replace(/^\\d+\\s*-\\s*/, '') : '';\n  return `   • *${r.filial_cod}*${desc ? ' ' + desc : ''} — ${num(r.rupturas_pendentes)} ruptura(s) • ${num(r.estoque_total_deposito)}un no depósito`;\n}).join('\\n');\n\nconst link = $env.APP_URL_COMP313 || 'http://margem.interno/agente/comparativo313';\n\nconst message = `Olá, *${u.nome}*!\\n\\n*Comparativo 313* — produtos faltando nas lojas com estoque no depósito 313:\\n\\nTotal: *${num(totalRupturas)}* ruptura(s) em ${filiaisComRuptura.length} filial(is) (${num(totalEstoque)} unidades disponíveis no depósito).\\n\\nQuebra por filial:\\n${linhas}\\n\\nAcesse: ${link}`;\n\nreturn [{\n  json: {\n    phone:       u.whatsapp,\n    message,\n    email_login: u.email_login,\n  }\n}];"
+      },
+      "id": "build-message",
+      "name": "Montar mensagem",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [80, 140]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.EVOLUTION_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "apikey",        "value": "={{$env.EVOLUTION_KEY}}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $json.phone }}\",\n  \"text\":   \"{{ $json.message }}\"\n}",
+        "options": {}
+      },
+      "id": "evolution-send",
+      "name": "Evolution: enviar WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [300, 140]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "notificacoes_log",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "agente_id",       "fieldValue": "TROCAR_PELO_UUID_DO_AGENTE_COMPARATIVO313" },
+            { "fieldId": "tipo",            "fieldValue": "resumo_diario_diretor" },
+            { "fieldId": "canal",           "fieldValue": "whatsapp" },
+            { "fieldId": "destino",         "fieldValue": "={{ $('Montar mensagem').item.json.phone }}" },
+            { "fieldId": "sucesso",         "fieldValue": "={{ $json.statusCode == null || $json.statusCode < 400 }}" }
+          ]
+        }
+      },
+      "id": "log-notif",
+      "name": "Log notificação",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [520, 140],
+      "credentials": {
+        "supabaseApi": {
+          "id": "TROCAR_PELO_ID_DA_SUA_CREDENCIAL_SUPABASE",
+          "name": "Supabase agentes"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule 09:10 seg-sáb":             { "main": [[{ "node": "Firestore: users",              "type": "main", "index": 0 }]] },
+    "Firestore: users":                   { "main": [[{ "node": "Filtrar diretor/supervisor",    "type": "main", "index": 0 }]] },
+    "Filtrar diretor/supervisor":         { "main": [[{ "node": "Supabase: resumo todas filiais","type": "main", "index": 0 }]] },
+    "Supabase: resumo todas filiais":     { "main": [[{ "node": "Resolver visibilidade",         "type": "main", "index": 0 }]] },
+    "Resolver visibilidade":              { "main": [[{ "node": "Loop",                          "type": "main", "index": 0 }]] },
+    "Loop":                               { "main": [[{ "node": "Tem ruptura?",                  "type": "main", "index": 0 }]] },
+    "Tem ruptura?":                       { "main": [
+      [{ "node": "Montar mensagem", "type": "main", "index": 0 }],
+      [{ "node": "Loop",            "type": "main", "index": 0 }]
+    ]},
+    "Montar mensagem":                    { "main": [[{ "node": "Evolution: enviar WhatsApp", "type": "main", "index": 0 }]] },
+    "Evolution: enviar WhatsApp":         { "main": [[{ "node": "Log notificação",            "type": "main", "index": 0 }]] },
+    "Log notificação":                    { "main": [[{ "node": "Loop",                       "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

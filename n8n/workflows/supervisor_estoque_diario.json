@@ -1,0 +1,624 @@
+{
+  "name": "supervisor_estoque — diário (API + alertas + notificações)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 7 * * *" }]
+        }
+      },
+      "id": "trg-cron",
+      "name": "Schedule: diário 07:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-2000, 0]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "agentes",
+        "returnAll": false,
+        "filters": {
+          "conditions": [
+            { "keyName": "slug", "condition": "eq", "keyValue": "supervisor_estoque" }
+          ]
+        }
+      },
+      "id": "get-agente",
+      "name": "Get agente_id",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-1760, 0],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "tableId": "agente_execucoes",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "agente_id", "fieldValue": "={{ $json.id }}" },
+            { "fieldId": "status",    "fieldValue": "rodando" },
+            { "fieldId": "origem",    "fieldValue": "n8n.diario_api" }
+          ]
+        }
+      },
+      "id": "exec-start",
+      "name": "Execução: rodando",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-1520, 0]
+    },
+    {
+      "parameters": {
+        "url": "http://192.168.118.50:3001/api/produtos",
+        "options": { "timeout": 120000 }
+      },
+      "id": "api-call",
+      "name": "API: /api/produtos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-1280, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =========================================================\n// Normaliza resposta da API → formato do RPC fn_supest_ingest_snapshots\n//   - adiciona snapshot_date=HOJE\n//   - todos os campos viram string; RPC parseia PT-BR\n//   - quebra em lotes de 1000 para reduzir tamanho do payload\n// =========================================================\nconst respostas = items.map(i => i.json).flat();\n// API pode devolver array direto OU {data:[...]}\nlet rows = [];\nfor (const r of respostas) {\n  if (Array.isArray(r)) rows = rows.concat(r);\n  else if (Array.isArray(r.data)) rows = rows.concat(r.data);\n  else rows.push(r);\n}\n\nconst hoje = new Date();\nconst snapshot_date = hoje.toISOString().slice(0,10);\n\nfunction s(v) { return v == null ? null : String(v); }\n\nconst KEYS_PASSTHRU = [\n  'filial','setor','departamento','secao','fornecedor',\n  'grade','estoque','preco','quant_vendas','media_dia','quant_movimentos',\n  'dias_venda','maximo','ultima_entrada','ultima_saida','mix','multiplo','giro'\n];\n\nconst normalized = rows.map(r => {\n  const o = { snapshot_date };\n  o.codigo_produto    = s(r.codigo);\n  o.descricao_produto = s(r.descricao);\n  o.cod_barras        = s(r.cod_barras);\n  for (const k of KEYS_PASSTHRU) o[k] = s(r[k]);\n  return o;\n});\n\nconst CHUNK = 1000;\nconst lotes = [];\nfor (let i = 0; i < normalized.length; i += CHUNK) {\n  lotes.push({\n    json: {\n      snapshot_date,\n      lote: Math.floor(i / CHUNK) + 1,\n      total_lotes: Math.ceil(normalized.length / CHUNK),\n      total_linhas: normalized.length,\n      rows: normalized.slice(i, i + CHUNK),\n    }\n  });\n}\nreturn lotes;"
+      },
+      "id": "normalize",
+      "name": "Normalizar + lotear",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1040, 0]
+    },
+    {
+      "parameters": { "options": { "reset": false } },
+      "id": "loop-ingest",
+      "name": "Loop lotes",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-800, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL}}/rest/v1/rpc/fn_supest_ingest_snapshots",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}" },
+            { "name": "Authorization", "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_origem\": \"api\",\n  \"p_rows\":   {{ JSON.stringify($json.rows) }}\n}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "rpc-ingest",
+      "name": "RPC: ingest lote",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-560, -16]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL}}/rest/v1/rpc/fn_supest_detect_alerts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}" },
+            { "name": "Authorization", "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_snapshot_date\": \"{{ $('Normalizar + lotear').first().json.snapshot_date }}\",\n  \"p_execucao_id\":   \"{{ $('Execução: rodando').first().json.id }}\",\n  \"p_threshold_pct\": 20\n}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "rpc-detect",
+      "name": "RPC: detectar alertas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-320, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL}}/rest/v1/rpc/fn_supest_atribuir_compradores",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}" },
+            { "name": "Authorization", "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"p_snapshot_date\": \"{{ $('Normalizar + lotear').first().json.snapshot_date }}\"\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "rpc-atrib",
+      "name": "RPC: atribuir compradores",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-80, 0]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "agente_execucoes",
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            { "keyName": "id", "condition": "eq", "keyValue": "={{ $('Execução: rodando').first().json.id }}" }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "status",      "fieldValue": "sucesso" },
+            { "fieldId": "finished_at", "fieldValue": "={{ $now.toISO() }}" },
+            { "fieldId": "metricas",    "fieldValue": "={{ JSON.stringify({ alertas_criados: ($('RPC: detectar alertas').first().json[0]||{}).alertas_criados || 0, alertas_atualizados: ($('RPC: detectar alertas').first().json[0]||{}).alertas_atualizados || 0 }) }}" }
+          ]
+        }
+      },
+      "id": "exec-done",
+      "name": "Execução: sucesso",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [160, 0]
+    },
+
+    {
+      "parameters": {
+        "operation": "getAll",
+        "projectId": "preco-b17ba",
+        "collection": "users"
+      },
+      "id": "fs-users",
+      "name": "Firestore: users",
+      "type": "n8n-nodes-base.googleFirebaseCloudFirestore",
+      "typeVersion": 1.1,
+      "position": [400, 0]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Diretor + supervisor — recebem o resumo de TODAS as filiais\nreturn items\n  .map(it => ({\n    json: {\n      email_login: (it.json.id || it.json.email_login || '').toLowerCase(),\n      nome:        it.json.nome,\n      funcao:      it.json.funcao,\n      agentes:     it.json.agentes,\n      whatsapp:    String(it.json.whatsapp || '').trim(),\n      loja:        it.json.loja,\n    }\n  }))\n  .filter(it => {\n    const d = it.json;\n    return ['diretor','supervisor','ti'].includes(d.funcao)\n      && Array.isArray(d.agentes) && d.agentes.includes('supervisor_estoque')\n      && d.whatsapp && d.whatsapp !== '0' && d.whatsapp.length > 5\n      && d.email_login;\n  });"
+      },
+      "id": "f-dir",
+      "name": "Filtrar diretor/supervisor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, -360]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "vw_supervisor_estoque_resumo_filial",
+        "returnAll": true
+      },
+      "id": "v-fil-dir",
+      "name": "View: resumo por filial (dir)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, -360],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resolve visibilidade (igual ao padrão dos outros agentes):\n//   - loja='todas' → ver todas as filiais\n//   - array de strings → filtra por essas filiais\nconst usuarios   = $('Filtrar diretor/supervisor').all().map(it => it.json);\nconst resumoTodo = $('View: resumo por filial (dir)').all().map(it => it.json);\nconst SENTINEL = 'todas';\nfunction extraiCod(raw) {\n  if (raw == null) return null;\n  const s = String(raw).trim();\n  if (!s) return null;\n  const m = s.match(/^(\\d+)/);\n  return m ? m[1] : s.toLowerCase();\n}\nfunction resolveLojas(lojaRaw) {\n  if (typeof lojaRaw === 'string' && lojaRaw.trim().toLowerCase() === SENTINEL) return { wildcard: true, filiais: [] };\n  const arr = Array.isArray(lojaRaw) ? lojaRaw : (lojaRaw == null || lojaRaw === '' ? [] : [lojaRaw]);\n  if (arr.some(x => String(x).trim().toLowerCase() === SENTINEL)) return { wildcard: true, filiais: [] };\n  const filiais = arr.map(extraiCod).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i);\n  return { wildcard: false, filiais };\n}\nreturn usuarios.map(u => {\n  const { wildcard, filiais } = resolveLojas(u.loja);\n  const resumo = wildcard ? resumoTodo : resumoTodo.filter(r => filiais.includes(String(r.filial_cod)));\n  return { json: { email_login: u.email_login, nome: u.nome, whatsapp: u.whatsapp, funcao: u.funcao, wildcard, filiais, resumo } };\n});"
+      },
+      "id": "r-dir",
+      "name": "Resolver visibilidade (dir)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, -360]
+    },
+    {
+      "parameters": { "options": {} },
+      "id": "loop-dir",
+      "name": "Loop dir",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1360, -360]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            { "id": "tem", "leftValue": "={{ ($json.resumo || []).reduce((s,r)=>s+Number(r.alertas_pendentes||0),0) }}", "rightValue": 0, "operator": { "type": "number", "operation": "gt" } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-dir",
+      "name": "Tem alerta?(dir)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1600, -360]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mensagem para diretor/supervisor\nconst u = $input.first().json;\nfunction num(v) { return v == null ? '—' : Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 0 }); }\nconst filiais = (u.resumo || []).filter(r => Number(r.alertas_pendentes||0) > 0)\n                  .sort((a,b) => Number(b.alertas_pendentes) - Number(a.alertas_pendentes));\nconst totalAlertas  = filiais.reduce((s,r)=> s + Number(r.alertas_pendentes||0), 0);\nconst totalProdutos = filiais.reduce((s,r)=> s + Number(r.produtos_afetados||0), 0);\nconst linhas = filiais.map(r => {\n  const desc = r.filial_desc ? r.filial_desc.replace(/^\\d+\\s*-\\s*/, '') : '';\n  return `   • *${r.filial_cod}*${desc?' '+desc:''} — ${num(r.alertas_pendentes)} alerta(s)`\n    + ` (queda:${num(r.alertas_queda)} | aumento:${num(r.alertas_aumento)})`;\n}).join('\\n');\nconst message = `Olá, *${u.nome}*!\\n\\n*Supervisor de Estoque* — variações relevantes hoje (vs média 7d, ≥20%):\\n\\nTotal: *${num(totalAlertas)}* alerta(s) em ${filiais.length} filial(is) · ${num(totalProdutos)} produto(s) afetado(s).\\n\\nQuebra por filial:\\n${linhas}`;\nreturn [{ json: { phone: u.whatsapp, message, email_login: u.email_login } }];"
+      },
+      "id": "msg-dir",
+      "name": "Mensagem (dir)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1840, -416]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.EVOLUTION_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "apikey",       "value": "={{$env.EVOLUTION_KEY}}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $json.phone }}\",\n  \"text\":   \"{{ $json.message }}\"\n}",
+        "options": {}
+      },
+      "id": "wa-dir",
+      "name": "WhatsApp (dir)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2080, -416]
+    },
+    {
+      "parameters": {
+        "tableId": "notificacoes_log",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "agente_id", "fieldValue": "={{ $('Get agente_id').first().json.id }}" },
+            { "fieldId": "tipo",      "fieldValue": "resumo_diario_diretor" },
+            { "fieldId": "canal",     "fieldValue": "whatsapp" },
+            { "fieldId": "destino",   "fieldValue": "={{ $('Mensagem (dir)').item.json.phone }}" },
+            { "fieldId": "sucesso",   "fieldValue": "true" },
+            { "fieldId": "payload",   "fieldValue": "={{ JSON.stringify({ status: $json.status, messageId: $json.key?.id, instanceId: $json.instanceId }) }}" }
+          ]
+        }
+      },
+      "id": "log-dir",
+      "name": "Log (dir)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2320, -416]
+    },
+    {
+      "parameters": { "amount": 30 },
+      "id": "wait-dir",
+      "name": "Wait (dir)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2560, -416],
+      "webhookId": "supest-wait-dir"
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Gerente — recebe APENAS sua(s) filial(is)\nreturn items\n  .map(it => ({\n    json: {\n      email_login: (it.json.id || it.json.email_login || '').toLowerCase(),\n      nome:        it.json.nome,\n      funcao:      it.json.funcao,\n      agentes:     it.json.agentes,\n      whatsapp:    String(it.json.whatsapp || '').trim(),\n      loja:        it.json.loja,\n    }\n  }))\n  .filter(it => {\n    const d = it.json;\n    return d.funcao === 'gerente'\n      && Array.isArray(d.agentes) && d.agentes.includes('supervisor_estoque')\n      && d.whatsapp && d.whatsapp !== '0' && d.whatsapp.length > 5\n      && d.email_login;\n  });"
+      },
+      "id": "f-ger",
+      "name": "Filtrar gerentes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 0]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "vw_supervisor_estoque_resumo_filial",
+        "returnAll": true
+      },
+      "id": "v-fil-ger",
+      "name": "View: resumo por filial (ger)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, 0],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const gerentes   = $('Filtrar gerentes').all().map(it => it.json);\nconst resumoTodo = $('View: resumo por filial (ger)').all().map(it => it.json);\nconst SENTINEL = 'todas';\nfunction extraiCod(raw) {\n  if (raw == null) return null;\n  const s = String(raw).trim();\n  if (!s) return null;\n  const m = s.match(/^(\\d+)/);\n  return m ? m[1] : s.toLowerCase();\n}\nfunction resolveLojas(lojaRaw) {\n  if (typeof lojaRaw === 'string' && lojaRaw.trim().toLowerCase() === SENTINEL) return { wildcard: true, filiais: [] };\n  const arr = Array.isArray(lojaRaw) ? lojaRaw : (lojaRaw == null || lojaRaw === '' ? [] : [lojaRaw]);\n  if (arr.some(x => String(x).trim().toLowerCase() === SENTINEL)) return { wildcard: true, filiais: [] };\n  const filiais = arr.map(extraiCod).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i);\n  return { wildcard: false, filiais };\n}\nreturn gerentes.map(u => {\n  const { wildcard, filiais } = resolveLojas(u.loja);\n  const resumo = wildcard ? resumoTodo : resumoTodo.filter(r => filiais.includes(String(r.filial_cod)));\n  return { json: { email_login: u.email_login, nome: u.nome, whatsapp: u.whatsapp, wildcard, filiais, resumo } };\n});"
+      },
+      "id": "r-ger",
+      "name": "Resolver filiais do gerente",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 0]
+    },
+    {
+      "parameters": { "options": {} },
+      "id": "loop-ger",
+      "name": "Loop ger",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1360, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            { "id": "tem", "leftValue": "={{ ($json.resumo || []).reduce((s,r)=>s+Number(r.alertas_pendentes||0),0) }}", "rightValue": 0, "operator": { "type": "number", "operation": "gt" } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-ger",
+      "name": "Tem alerta?(ger)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1600, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const u = $input.first().json;\nfunction num(v) { return v == null ? '—' : Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 0 }); }\nconst filiais = (u.resumo || []).filter(r => Number(r.alertas_pendentes||0) > 0)\n                  .sort((a,b)=>Number(b.alertas_pendentes)-Number(a.alertas_pendentes));\nconst total = filiais.reduce((s,r)=>s+Number(r.alertas_pendentes||0),0);\nconst blocos = filiais.map(r => {\n  return `*${r.filial_desc || r.filial_cod}*\\n   • Total de alertas: ${num(r.alertas_pendentes)} (queda:${num(r.alertas_queda)} | aumento:${num(r.alertas_aumento)})\\n   • Por métrica — media_dia:${num(r.alertas_media_dia)} · dias_venda:${num(r.alertas_dias_venda)} · giro:${num(r.alertas_giro)}\\n   • Produtos afetados: ${num(r.produtos_afetados)} em ${num(r.secoes_afetadas)} seção(ões)`;\n}).join('\\n\\n');\nconst link = $env.APP_URL_SUPEST || 'http://app.interno/agente/supervisor_estoque';\nconst plural = filiais.length === 1 ? 'sua loja' : 'suas lojas';\nconst message = `Olá, *${u.nome}*!\\n\\n*Supervisor de Estoque* — variações em ${plural} (vs média 7d, ≥20%):\\n\\nTotal: *${num(total)}* alerta(s).\\n\\n${blocos}\\n\\nAcesse: ${link}`;\nreturn [{ json: { phone: u.whatsapp, message, email_login: u.email_login } }];"
+      },
+      "id": "msg-ger",
+      "name": "Mensagem (ger)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1840, -56]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.EVOLUTION_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "apikey",       "value": "={{$env.EVOLUTION_KEY}}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $json.phone }}\",\n  \"text\":   \"{{ $json.message }}\"\n}",
+        "options": {}
+      },
+      "id": "wa-ger",
+      "name": "WhatsApp (ger)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2080, -56]
+    },
+    {
+      "parameters": {
+        "tableId": "notificacoes_log",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "agente_id", "fieldValue": "={{ $('Get agente_id').first().json.id }}" },
+            { "fieldId": "tipo",      "fieldValue": "resumo_diario_gerente" },
+            { "fieldId": "canal",     "fieldValue": "whatsapp" },
+            { "fieldId": "destino",   "fieldValue": "={{ $('Mensagem (ger)').item.json.phone }}" },
+            { "fieldId": "sucesso",   "fieldValue": "true" },
+            { "fieldId": "payload",   "fieldValue": "={{ JSON.stringify({ status: $json.status, messageId: $json.key?.id, instanceId: $json.instanceId }) }}" }
+          ]
+        }
+      },
+      "id": "log-ger",
+      "name": "Log (ger)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2320, -56]
+    },
+    {
+      "parameters": { "amount": 30 },
+      "id": "wait-ger",
+      "name": "Wait (ger)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2560, -56],
+      "webhookId": "supest-wait-ger"
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Comprador — recebe APENAS suas seções (já está atribuído por chave_secao)\nreturn items\n  .map(it => ({\n    json: {\n      email_login: (it.json.id || it.json.email_login || '').toLowerCase(),\n      nome:        it.json.nome,\n      funcao:      it.json.funcao,\n      agentes:     it.json.agentes,\n      whatsapp:    String(it.json.whatsapp || '').trim(),\n    }\n  }))\n  .filter(it => {\n    const d = it.json;\n    return d.funcao === 'comprador'\n      && Array.isArray(d.agentes) && d.agentes.includes('supervisor_estoque')\n      && d.whatsapp && d.whatsapp !== '0' && d.whatsapp.length > 5\n      && d.email_login;\n  });"
+      },
+      "id": "f-cmp",
+      "name": "Filtrar compradores",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 360]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "vw_supervisor_estoque_resumo_responsavel",
+        "returnAll": true
+      },
+      "id": "v-resp",
+      "name": "View: resumo por responsável",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, 360],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "vw_supervisor_estoque_resumo_filial_comprador",
+        "returnAll": true
+      },
+      "id": "v-drill",
+      "name": "View: drill filial × comprador",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, 520],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const compradores = $('Filtrar compradores').all().map(it => it.json);\nconst resumoResp  = $('View: resumo por responsável').all().map(it => it.json);\nconst drill       = $('View: drill filial × comprador').all().map(it => it.json);\nfunction matchByEmail(arr, email) {\n  if (!email) return null;\n  return arr.find(r => String(r.usuario_email_login || '').toLowerCase() === email) || null;\n}\nreturn compradores.map(c => {\n  const resumo = matchByEmail(resumoResp, c.email_login);\n  const porFilial = resumo\n    ? drill.filter(d => String(d.usuario_id) === String(resumo.usuario_id))\n           .filter(d => Number(d.alertas_pendentes || 0) > 0)\n           .sort((a,b)=>Number(b.alertas_pendentes)-Number(a.alertas_pendentes))\n    : [];\n  return {\n    json: {\n      email_login: c.email_login,\n      nome:        c.nome,\n      whatsapp:    c.whatsapp,\n      alertas_pendentes: Number(resumo?.alertas_pendentes || 0),\n      filiais_afetadas:   Number(resumo?.filiais_afetadas || 0),\n      secoes_afetadas:    Number(resumo?.secoes_afetadas || 0),\n      alertas_media_dia:  Number(resumo?.alertas_media_dia || 0),\n      alertas_dias_venda: Number(resumo?.alertas_dias_venda || 0),\n      alertas_giro:       Number(resumo?.alertas_giro || 0),\n      por_filial: porFilial,\n    }\n  };\n});"
+      },
+      "id": "r-cmp",
+      "name": "Resolver dados do comprador",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 440]
+    },
+    {
+      "parameters": { "options": {} },
+      "id": "loop-cmp",
+      "name": "Loop cmp",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1360, 440]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            { "id": "tem", "leftValue": "={{ $json.alertas_pendentes }}", "rightValue": 0, "operator": { "type": "number", "operation": "gt" } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-cmp",
+      "name": "Tem alerta?(cmp)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1600, 440]
+    },
+    {
+      "parameters": {
+        "jsCode": "const u = $input.first().json;\nfunction num(v) { return v == null ? '—' : Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 0 }); }\nconst porFilial = (u.por_filial || []).slice(0, 5);\nconst linhasFiliais = porFilial.length\n  ? porFilial.map(f => `   • *${f.filial_cod}* — ${num(f.alertas_pendentes)} alerta(s)`).join('\\n')\n  : '';\nconst extras = (u.por_filial || []).length > porFilial.length\n  ? `\\n   …e mais ${u.por_filial.length - porFilial.length} filial(is).`\n  : '';\nconst metricas = `media_dia:${num(u.alertas_media_dia)} · dias_venda:${num(u.alertas_dias_venda)} · giro:${num(u.alertas_giro)}`;\nconst message = `Olá, *${u.nome}*!\\n\\n*Supervisor de Estoque* — variações nas suas seções (vs média 7d, ≥20%):\\n\\nVocê tem *${num(u.alertas_pendentes)}* alerta(s) em ${num(u.filiais_afetadas)} filial(is) · ${num(u.secoes_afetadas)} seção(ões).\\nDistribuição: ${metricas}\\n${porFilial.length ? '\\nPrincipais filiais:\\n' + linhasFiliais + extras : ''}`;\nreturn [{ json: { phone: u.whatsapp, message, email_login: u.email_login } }];"
+      },
+      "id": "msg-cmp",
+      "name": "Mensagem (cmp)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1840, 384]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.EVOLUTION_URL}}/message/sendText/{{$env.EVOLUTION_INSTANCE}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "apikey",       "value": "={{$env.EVOLUTION_KEY}}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $json.phone }}\",\n  \"text\":   \"{{ $json.message }}\"\n}",
+        "options": {}
+      },
+      "id": "wa-cmp",
+      "name": "WhatsApp (cmp)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2080, 384]
+    },
+    {
+      "parameters": {
+        "tableId": "notificacoes_log",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "agente_id", "fieldValue": "={{ $('Get agente_id').first().json.id }}" },
+            { "fieldId": "tipo",      "fieldValue": "resumo_diario_comprador" },
+            { "fieldId": "canal",     "fieldValue": "whatsapp" },
+            { "fieldId": "destino",   "fieldValue": "={{ $('Mensagem (cmp)').item.json.phone }}" },
+            { "fieldId": "sucesso",   "fieldValue": "true" },
+            { "fieldId": "payload",   "fieldValue": "={{ JSON.stringify({ status: $json.status, messageId: $json.key?.id, instanceId: $json.instanceId }) }}" }
+          ]
+        }
+      },
+      "id": "log-cmp",
+      "name": "Log (cmp)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2320, 384]
+    },
+    {
+      "parameters": { "amount": 30 },
+      "id": "wait-cmp",
+      "name": "Wait (cmp)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2560, 384],
+      "webhookId": "supest-wait-cmp"
+    },
+
+    {
+      "parameters": {
+        "content": "## supervisor_estoque — Diário (Etapa 2)\n\n**Cron:** todo dia 07:00.\n\n**Fluxo:**\n1. Chama `/api/produtos` da API interna\n2. Upsert em `supervisor_estoque_snapshots` (origem='api')\n3. RPC `fn_supest_detect_alerts` — gera alertas (variação ≥ 20% vs média 7d em media_dia, dias_venda, giro)\n4. RPC `fn_supest_atribuir_compradores` — liga alerta ↔ comprador por chave_secao\n5. 3 ramos paralelos: diretor/supervisor (resumo todas filiais), gerente (suas filiais), comprador (suas seções)\n6. Envia WhatsApp via Evolution e loga em `notificacoes_log`\n\n**Pré-requisito:** Etapa 1 já populou pelo menos 3 dias de histórico.\n\n**Env vars:** SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, EVOLUTION_URL, EVOLUTION_INSTANCE, EVOLUTION_KEY, APP_URL_SUPEST.",
+        "height": 240,
+        "width": 540
+      },
+      "id": "note",
+      "name": "Como usar",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-2000, -340]
+    }
+  ],
+  "connections": {
+    "Schedule: diário 07:00":     { "main": [[{ "node": "Get agente_id", "type": "main", "index": 0 }]] },
+    "Get agente_id":              { "main": [[{ "node": "Execução: rodando", "type": "main", "index": 0 }]] },
+    "Execução: rodando":          { "main": [[{ "node": "API: /api/produtos", "type": "main", "index": 0 }]] },
+    "API: /api/produtos":         { "main": [[{ "node": "Normalizar + lotear", "type": "main", "index": 0 }]] },
+    "Normalizar + lotear":        { "main": [[{ "node": "Loop lotes", "type": "main", "index": 0 }]] },
+    "Loop lotes":                 { "main": [[{ "node": "RPC: detectar alertas", "type": "main", "index": 0 }], [{ "node": "RPC: ingest lote", "type": "main", "index": 0 }]] },
+    "RPC: ingest lote":           { "main": [[{ "node": "Loop lotes", "type": "main", "index": 0 }]] },
+    "RPC: detectar alertas":      { "main": [[{ "node": "RPC: atribuir compradores", "type": "main", "index": 0 }]] },
+    "RPC: atribuir compradores":  { "main": [[{ "node": "Execução: sucesso", "type": "main", "index": 0 }]] },
+    "Execução: sucesso":          { "main": [[{ "node": "Firestore: users", "type": "main", "index": 0 }]] },
+    "Firestore: users":           { "main": [[{ "node": "Filtrar diretor/supervisor", "type": "main", "index": 0 }, { "node": "Filtrar gerentes", "type": "main", "index": 0 }, { "node": "Filtrar compradores", "type": "main", "index": 0 }]] },
+
+    "Filtrar diretor/supervisor":  { "main": [[{ "node": "View: resumo por filial (dir)", "type": "main", "index": 0 }]] },
+    "View: resumo por filial (dir)": { "main": [[{ "node": "Resolver visibilidade (dir)", "type": "main", "index": 0 }]] },
+    "Resolver visibilidade (dir)": { "main": [[{ "node": "Loop dir", "type": "main", "index": 0 }]] },
+    "Loop dir":                    { "main": [[], [{ "node": "Tem alerta?(dir)", "type": "main", "index": 0 }]] },
+    "Tem alerta?(dir)":            { "main": [[{ "node": "Mensagem (dir)", "type": "main", "index": 0 }], [{ "node": "Loop dir", "type": "main", "index": 0 }]] },
+    "Mensagem (dir)":              { "main": [[{ "node": "WhatsApp (dir)", "type": "main", "index": 0 }]] },
+    "WhatsApp (dir)":              { "main": [[{ "node": "Log (dir)", "type": "main", "index": 0 }]] },
+    "Log (dir)":                   { "main": [[{ "node": "Wait (dir)", "type": "main", "index": 0 }]] },
+    "Wait (dir)":                  { "main": [[{ "node": "Loop dir", "type": "main", "index": 0 }]] },
+
+    "Filtrar gerentes":            { "main": [[{ "node": "View: resumo por filial (ger)", "type": "main", "index": 0 }]] },
+    "View: resumo por filial (ger)": { "main": [[{ "node": "Resolver filiais do gerente", "type": "main", "index": 0 }]] },
+    "Resolver filiais do gerente": { "main": [[{ "node": "Loop ger", "type": "main", "index": 0 }]] },
+    "Loop ger":                    { "main": [[], [{ "node": "Tem alerta?(ger)", "type": "main", "index": 0 }]] },
+    "Tem alerta?(ger)":            { "main": [[{ "node": "Mensagem (ger)", "type": "main", "index": 0 }], [{ "node": "Loop ger", "type": "main", "index": 0 }]] },
+    "Mensagem (ger)":              { "main": [[{ "node": "WhatsApp (ger)", "type": "main", "index": 0 }]] },
+    "WhatsApp (ger)":              { "main": [[{ "node": "Log (ger)", "type": "main", "index": 0 }]] },
+    "Log (ger)":                   { "main": [[{ "node": "Wait (ger)", "type": "main", "index": 0 }]] },
+    "Wait (ger)":                  { "main": [[{ "node": "Loop ger", "type": "main", "index": 0 }]] },
+
+    "Filtrar compradores":         { "main": [[{ "node": "View: resumo por responsável", "type": "main", "index": 0 }]] },
+    "View: resumo por responsável": { "main": [[{ "node": "View: drill filial × comprador", "type": "main", "index": 0 }]] },
+    "View: drill filial × comprador": { "main": [[{ "node": "Resolver dados do comprador", "type": "main", "index": 0 }]] },
+    "Resolver dados do comprador": { "main": [[{ "node": "Loop cmp", "type": "main", "index": 0 }]] },
+    "Loop cmp":                    { "main": [[], [{ "node": "Tem alerta?(cmp)", "type": "main", "index": 0 }]] },
+    "Tem alerta?(cmp)":            { "main": [[{ "node": "Mensagem (cmp)", "type": "main", "index": 0 }], [{ "node": "Loop cmp", "type": "main", "index": 0 }]] },
+    "Mensagem (cmp)":              { "main": [[{ "node": "WhatsApp (cmp)", "type": "main", "index": 0 }]] },
+    "WhatsApp (cmp)":              { "main": [[{ "node": "Log (cmp)", "type": "main", "index": 0 }]] },
+    "Log (cmp)":                   { "main": [[{ "node": "Wait (cmp)", "type": "main", "index": 0 }]] },
+    "Wait (cmp)":                  { "main": [[{ "node": "Loop cmp", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "active": false,
+  "tags": []
+}
