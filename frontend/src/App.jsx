@@ -20,6 +20,7 @@ import { VendasLayout } from './agentes/vendas/index.jsx';
 import { Painel as VendasPainel } from './agentes/vendas/Painel';
 import { Comparativo as VendasComparativo } from './agentes/vendas/Comparativo';
 import { Tendencia as VendasTendencia } from './agentes/vendas/Tendencia';
+import { Cobertura as VendasCobertura } from './agentes/vendas/Cobertura';
 
 export default function App() {
   const { user, loading } = useAuth();
@@ -75,6 +76,7 @@ export default function App() {
           <Route index element={<VendasPainel />} />
           <Route path="comparativo" element={<VendasComparativo />} />
           <Route path="tendencia" element={<VendasTendencia />} />
+          <Route path="estoque" element={<VendasCobertura />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

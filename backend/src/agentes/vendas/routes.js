@@ -179,4 +179,72 @@ vendasRouter.get('/comparativo', authFirebase, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/**
+ * GET /agente/vendas/estoque-datas
+ * Datas de snapshot de estoque disponíveis (para o seletor da tela).
+ */
+vendasRouter.get('/estoque-datas', authFirebase, async (_req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('estoque_diario')
+      .select('data')
+      .order('data', { ascending: false })
+      .limit(2000);
+    if (error) throw error;
+    const datas = [...new Set((data || []).map(r => r.data))];
+    res.json({ ultima: datas[0] || null, datas });
+  } catch (err) { next(err); }
+});
+
+/**
+ * GET /agente/vendas/cobertura
+ *   ?from=&to=                      período de vendas p/ a média
+ *   &data_estoque=                  snapshot (default: o mais recente)
+ *   &lead_time=7&dias_seguranca=3&dias_excesso=60
+ *   &<filtros multi por vírgula>
+ *
+ * Cruza vendas × estoque: média diária, cobertura em dias, status
+ * (ruptura/crítico/atenção/ok/excesso/sem_giro) e sugestão de compra.
+ */
+vendasRouter.get('/cobertura', authFirebase, async (req, res, next) => {
+  try {
+    const from = (req.query.from || '').toString().trim() || null;
+    const to   = (req.query.to   || '').toString().trim() || null;
+    if (!from || !to) return res.status(400).json({ error: 'from e to são obrigatórios (YYYY-MM-DD)' });
+    if (!ISO_DATE.test(from) || !ISO_DATE.test(to)) {
+      return res.status(400).json({ error: 'from/to devem ser YYYY-MM-DD' });
+    }
+    const dataEstoque = (req.query.data_estoque || '').toString().trim() || null;
+    if (dataEstoque && !ISO_DATE.test(dataEstoque)) {
+      return res.status(400).json({ error: 'data_estoque deve ser YYYY-MM-DD' });
+    }
+
+    const intOr = (v, def) => {
+      const n = Number((v || '').toString().trim());
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : def;
+    };
+    const leadTime  = intOr(req.query.lead_time, 7);
+    const seguranca = intOr(req.query.dias_seguranca, 3);
+    const excesso   = intOr(req.query.dias_excesso, 60);
+
+    const filtros = {};
+    for (const k of ['filial_cod', 'secao_cod', 'departamento_cod', 'produto_cod', 'comprador_cod']) {
+      const arr = (req.query[k] || '').toString().split(',').map(s => s.trim()).filter(Boolean);
+      if (arr.length) filtros[k] = arr;
+    }
+
+    const { data, error } = await supabase.rpc('fn_estoque_cobertura', {
+      p_from: from,
+      p_to: to,
+      p_data_estoque: dataEstoque,
+      p_lead_time: leadTime,
+      p_dias_seguranca: seguranca,
+      p_dias_excesso: excesso,
+      p_filtros: filtros,
+    });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) { next(err); }
+});
+
 logger.info('Rotas /agente/vendas carregadas');

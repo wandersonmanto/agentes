@@ -38,6 +38,7 @@ export function VendasLayout() {
             <NavLink to="/agente/vendas" end className={navCls}>Painel</NavLink>
             <NavLink to="/agente/vendas/comparativo" className={navCls}>Comparativo</NavLink>
             <NavLink to="/agente/vendas/tendencia" className={navCls}>Tendência</NavLink>
+            <NavLink to="/agente/vendas/estoque" className={navCls}>Estoque</NavLink>
           </nav>
         </div>
       </header>
