@@ -70,8 +70,10 @@ cd ..
 ## 5. Subir os serviços com PM2
 
 ```powershell
-# Backend (API na porta 3000)
-pm2 start backend/src/server.js --name agentes-backend
+# Backend (API na porta 3000) — usa o ecosystem.config.js da raiz.
+# Ele já define cwd = backend/, então o dotenv encontra o backend/.env.
+# NUNCA colocar chaves/tokens no ecosystem.config.js — eles vivem no backend/.env.
+pm2 start ecosystem.config.js
 
 # Frontend (build estático servido como SPA na porta 5173)
 cd frontend ; npm run build ; cd ..
