@@ -227,8 +227,11 @@ vendasRouter.get('/cobertura', authFirebase, async (req, res, next) => {
     const seguranca = intOr(req.query.dias_seguranca, 3);
     const excesso   = intOr(req.query.dias_excesso, 60);
 
+    // canal e fornecedor só existem na venda (o estoque não os tem): a RPC
+    // aplica esses filtros pelo lado das vendas e restringe os produtos.
     const filtros = {};
-    for (const k of ['filial_cod', 'secao_cod', 'departamento_cod', 'produto_cod', 'comprador_cod']) {
+    for (const k of ['filial_cod', 'secao_cod', 'departamento_cod', 'produto_cod',
+                     'comprador_cod', 'canal_cod', 'fornecedor_cod']) {
       const arr = (req.query[k] || '').toString().split(',').map(s => s.trim()).filter(Boolean);
       if (arr.length) filtros[k] = arr;
     }
@@ -241,6 +244,34 @@ vendasRouter.get('/cobertura', authFirebase, async (req, res, next) => {
       p_dias_seguranca: seguranca,
       p_dias_excesso: excesso,
       p_filtros: filtros,
+    });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) { next(err); }
+});
+
+/**
+ * GET /agente/vendas/produto-serie?produto=283605&from=&to=&filial=300
+ * Série diária de um produto: venda × estoque disponível (com a origem da
+ * linha de estoque — 'arquivo' ou 'derivado'). Usada no drawer do produto.
+ */
+vendasRouter.get('/produto-serie', authFirebase, async (req, res, next) => {
+  try {
+    const produto = (req.query.produto || '').toString().trim();
+    if (!produto) return res.status(400).json({ error: 'produto é obrigatório' });
+
+    const from = (req.query.from || '').toString().trim();
+    const to   = (req.query.to   || '').toString().trim();
+    if (!ISO_DATE.test(from) || !ISO_DATE.test(to)) {
+      return res.status(400).json({ error: 'from/to devem ser YYYY-MM-DD' });
+    }
+    const filial = (req.query.filial || '').toString().trim() || null;
+
+    const { data, error } = await supabase.rpc('fn_estoque_produto_serie', {
+      p_produto_cod: produto,
+      p_from: from,
+      p_to: to,
+      p_filial_cod: filial,
     });
     if (error) throw error;
     res.json(data || []);

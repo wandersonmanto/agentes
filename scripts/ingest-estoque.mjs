@@ -182,9 +182,14 @@ function parseNum(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-function normalize(rows, dataSnapshot) {
+// CDs / depósitos que NÃO vendem: só interessam pela foto ATUAL de estoque
+// (para repor a ruptura de uma loja a partir da CD). Não guardamos histórico
+// diário deles — só a foto mais recente entra.
+const CD_FILIAIS = new Set(['87', '313']);
+
+function normalize(rows, dataSnapshot, manterCD) {
   const out = [];
-  let semChave = 0;
+  let semChave = 0, cdPuladas = 0;
   for (const r of rows) {
     const [filial_cod, filial_nome]             = splitCodNome(r[COL.filial]);
     const [produto_cod, produto_nome]           = splitCodNome(r[COL.produto]);
@@ -192,6 +197,8 @@ function normalize(rows, dataSnapshot) {
     const [secao_cod, secao_nome]               = splitCodNome(r[COL.secao]); // já faz trim
 
     if (!filial_cod || !produto_cod) { semChave++; continue; }
+    // CD só entra se for a foto mais recente da carga (senão é histórico morto)
+    if (CD_FILIAIS.has(filial_cod) && !manterCD) { cdPuladas++; continue; }
 
     const cb = r[COL.cod_barras];
     out.push({
@@ -211,14 +218,17 @@ function normalize(rows, dataSnapshot) {
       custo_total_estoque:    parseNum(r[COL.custo_total_estoque]),
     });
   }
-  return { rows: out, semChave };
+  return { rows: out, semChave, cdPuladas };
 }
 
 const fmt = (n) => Number(n).toLocaleString('pt-BR');
 
-async function ingestFile(filePath, prefix = '') {
+async function ingestFile(filePath, opts = {}) {
+  const { prefix = '', newestDate = null } = opts;
   const fileName = path.basename(filePath);
   const { data: dataSnapshot, fonte } = resolveData(fileName);
+  // CD só é mantido quando este arquivo é a foto mais recente da carga.
+  const manterCD = (newestDate == null) || (dataSnapshot === newestDate);
 
   console.log(`${prefix}Arquivo:  ${fileName}`);
   console.log(`${prefix}Snapshot: ${dataSnapshot}  (${fonte})`);
@@ -245,9 +255,10 @@ async function ingestFile(filePath, prefix = '') {
   const dados = matriz.slice(1).filter(r => r && r.some(v => v != null && v !== ''));
   console.log(`${prefix}  ${fmt(dados.length)} linhas brutas`);
 
-  const { rows, semChave } = normalize(dados, dataSnapshot);
-  console.log(`${prefix}  ${fmt(rows.length)} linhas válidas`);
-  if (semChave) console.log(`${prefix}  ${fmt(semChave)} ignoradas (sem filial/produto)`);
+  const { rows, semChave, cdPuladas } = normalize(dados, dataSnapshot, manterCD);
+  console.log(`${prefix}  ${fmt(rows.length)} linhas válidas${manterCD ? '  (inclui CDs 87/313 — foto atual)' : ''}`);
+  if (semChave)  console.log(`${prefix}  ${fmt(semChave)} ignoradas (sem filial/produto)`);
+  if (cdPuladas) console.log(`${prefix}  ${fmt(cdPuladas)} ignoradas (CD 87/313 — só a foto mais recente é guardada)`);
   if (rows.length === 0) return { ok: false, msg: 'nenhuma linha válida' };
 
   if (dryRun) {
@@ -299,28 +310,55 @@ async function ingestFile(filePath, prefix = '') {
 }
 
 // ---------------------------------------------------------------- run
+// Mantém só a foto mais recente das CDs (87/313) na base.
+async function manterCDatual() {
+  if (dryRun || !supabase) return;
+  process.stdout.write('▸ Mantendo só a foto atual das CDs (87/313)... ');
+  const { data, error } = await supabase.rpc('fn_estoque_manter_cd_atual');
+  console.log(error ? `FALHOU (${error.message})` : `${Number(data || 0)} linha(s) de histórico de CD removida(s)`);
+}
+
 if (!inputIsDir) {
-  const res = await ingestFile(inputPath);
+  const res = await ingestFile(inputPath);   // arquivo único = foto atual, mantém CD
   if (!res.ok) { console.error(`\nFalhou: ${res.msg}`); process.exit(1); }
+  await manterCDatual();
 } else {
-  const arquivos = fs.readdirSync(inputPath)
+  const candidatos = fs.readdirSync(inputPath)
     .filter(n => /\.xlsx$/i.test(n))
     .filter(n => !n.startsWith('~$'))
-    .filter(n => n.toLowerCase().includes('estoque'))
-    .sort()
+    .filter(n => n.toLowerCase().includes('estoque'));
+
+  // Em modo pasta a data é OBRIGATÓRIA no nome: carimbar "hoje" num arquivo
+  // antigo gravaria a foto no dia errado, em silêncio. Sem data -> pula.
+  // (Para carregar um arquivo sem data, aponte direto para ele e use --date.)
+  const semData = candidatos.filter(n => !dateFromFilename(n));
+  const arquivos = candidatos
+    .filter(n => dateFromFilename(n))
+    .sort((a, b) => dateFromFilename(a).localeCompare(dateFromFilename(b)))
     .map(n => path.join(inputPath, n));
 
+  if (semData.length) {
+    console.warn('⚠ Ignorados (sem data no nome — a data do estoque não pode ser adivinhada):');
+    for (const n of semData) console.warn(`    ${n}`);
+    console.warn('  Para carregar um deles: aponte o arquivo e passe --date AAAA-MM-DD.\n');
+  }
+
   if (arquivos.length === 0) {
-    console.error(`Nenhum *.xlsx contendo "estoque" em ${inputPath}`);
+    console.error(`Nenhum *.xlsx de estoque COM data no nome em ${inputPath}`);
+    console.error('Ex.: estoque_2026-07-13.xlsx ou estoque_13-07-2026.xlsx');
     process.exit(1);
   }
+  // foto mais recente da carga: só nela as CDs são mantidas
+  const newestDate = dateFromFilename(path.basename(arquivos[arquivos.length - 1]));
+
   console.log(`Pasta:    ${inputPath}`);
-  console.log(`Arquivos: ${arquivos.length}${dryRun ? '  [DRY-RUN]' : ''}\n`);
+  console.log(`Arquivos: ${arquivos.length}${dryRun ? '  [DRY-RUN]' : ''}`);
+  console.log(`CD 87/313: só a foto de ${newestDate} é guardada (demais dias das CDs são pulados)\n`);
 
   let ok = 0, fail = 0;
   for (let i = 0; i < arquivos.length; i++) {
     console.log('─'.repeat(60));
-    const res = await ingestFile(arquivos[i], `[${i + 1}/${arquivos.length}] `);
+    const res = await ingestFile(arquivos[i], { prefix: `[${i + 1}/${arquivos.length}] `, newestDate });
     if (res.ok) ok++;
     else {
       fail++;
@@ -329,5 +367,6 @@ if (!inputIsDir) {
   }
   console.log('═'.repeat(60));
   console.log(`Total: ${ok} ok, ${fail} falhou`);
+  if (ok > 0) await manterCDatual();
   if (fail > 0) process.exit(2);
 }

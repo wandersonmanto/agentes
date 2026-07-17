@@ -10,12 +10,14 @@ import { useEffect, useMemo, useState } from 'react';
 import { Search, AlertTriangle, AlertCircle, CheckCircle2, PackageX, Layers } from 'lucide-react';
 import { api } from '../../lib/api';
 import { MultiSelect } from './MultiSelect';
+import { ProdutoDrill } from './ProdutoDrill';
 
 const money = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const num   = (v) => Number(v || 0).toLocaleString('pt-BR', { maximumFractionDigits: 0 });
 const num2  = (v) => Number(v || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
 
-const MULTI_KEYS = ['filial_cod', 'secao_cod', 'departamento_cod', 'comprador_cod'];
+const MULTI_KEYS = ['filial_cod', 'secao_cod', 'departamento_cod', 'comprador_cod',
+                    'canal_cod', 'fornecedor_cod'];
 
 const STATUS = {
   ruptura:  { label: 'Ruptura',  cls: 'bg-rose-100 text-rose-800',       Icon: PackageX,      tone: 'rose' },
@@ -35,12 +37,16 @@ export function Cobertura() {
     from: '', to: '', data_estoque: '',
     lead_time: 7, dias_seguranca: 3, dias_excesso: 60,
     filial_cod: [], secao_cod: [], departamento_cod: [], comprador_cod: [],
+    canal_cod: [], fornecedor_cod: [],
   });
   const [filtroStatus, setFiltroStatus] = useState('todos');
   const [rows, setRows]       = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState('');
   const [jaConsultou, setJaConsultou] = useState(false);
+  const [drill, setDrill]     = useState(null); // produto clicado
+  // ordenação da tabela; key=null -> mantém a ordem da RPC (ruptura/crítico primeiro)
+  const [sort, setSort]       = useState({ key: null, dir: 'desc' });
 
   useEffect(() => {
     Promise.all([
@@ -51,9 +57,16 @@ export function Cobertura() {
       setPeriodo(per);
       setOpts(filt || {});
       setEstDatas(est || { ultima: null, datas: [] });
+      // Padrão: últimos ~21 dias (rápido). Períodos longos (mês inteiro) o
+      // usuário amplia manualmente — são mais pesados de calcular.
+      const defFrom = (per?.min_dia && per?.max_dia)
+        ? (() => { const d = new Date(per.max_dia + 'T00:00:00'); d.setDate(d.getDate() - 20);
+                   const iso = d.toISOString().slice(0, 10);
+                   return iso > per.min_dia ? iso : per.min_dia; })()
+        : (per?.min_dia || '');
       setForm(f => ({
         ...f,
-        from: per?.min_dia || '',
+        from: defFrom,
         to: per?.max_dia || '',
         data_estoque: est?.ultima || '',
       }));
@@ -90,10 +103,46 @@ export function Cobertura() {
               .reduce((s, r) => s + Number(r.valor_estoque || 0), 0), [rows]
   );
 
-  const visiveis = useMemo(
-    () => (filtroStatus === 'todos' ? rows : rows.filter(r => r.status === filtroStatus)).slice(0, 500),
-    [rows, filtroStatus]
-  );
+  // Colunas numéricas abrem no 1º clique em MAIOR -> MENOR (o que interessa:
+  // maior custo, maior sugestão, maior venda...). Já texto e gravidade abrem
+  // no sentido útil: A->Z, e Status começando pela RUPTURA (a mais grave) —
+  // decrescente ali jogaria "sem giro" para o topo, que é o inverso do útil.
+  const ASC_PRIMEIRO = new Set(['produto_nome', 'fornecedor_nome', 'base_media', 'status']);
+
+  // 1º clique ordena, 2º inverte, 3º volta à ordem original da RPC
+  function ordenarPor(key) {
+    setSort(s => {
+      const primeira = ASC_PRIMEIRO.has(key) ? 'asc' : 'desc';
+      const segunda  = primeira === 'asc' ? 'desc' : 'asc';
+      if (s.key !== key)      return { key, dir: primeira };
+      if (s.dir === primeira) return { key, dir: segunda };
+      return { key: null, dir: 'desc' };   // volta ao padrão (urgentes primeiro)
+    });
+  }
+
+  const ordenadas = useMemo(() => {
+    const base = filtroStatus === 'todos' ? rows : rows.filter(r => r.status === filtroStatus);
+    if (!sort.key) return base;                   // ordem original: mais urgente primeiro
+    const dir = sort.dir === 'asc' ? 1 : -1;
+    // status ordena por GRAVIDADE (ruptura > crítico > ...), não por alfabeto
+    const rank = (r) => ORDEM.indexOf(r.status);
+    return [...base].sort((a, b) => {
+      if (sort.key === 'status') return (rank(a) - rank(b)) * dir;
+      const va = a[sort.key];
+      const vb = b[sort.key];
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;                   // nulos sempre por último
+      if (vb == null) return -1;
+      const na = Number(va), nb = Number(vb);
+      // só trata como número se AMBOS forem numéricos (evita "300" vs "ELETRO")
+      if (Number.isFinite(na) && Number.isFinite(nb) && va !== '' && vb !== '') {
+        return (na - nb) * dir;
+      }
+      return String(va).localeCompare(String(vb), 'pt-BR') * dir;
+    });
+  }, [rows, filtroStatus, sort]);
+
+  const visiveis = useMemo(() => ordenadas.slice(0, 500), [ordenadas]);
 
   const semEstoque = estDatas.datas.length === 0;
 
@@ -153,12 +202,18 @@ export function Cobertura() {
           <summary className="text-xs text-slate-500 cursor-pointer select-none">Filtros avançados</summary>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
             <MultiSelect label="Filial"       options={opts.filiais}       value={form.filial_cod}       onChange={v => set('filial_cod', v)} />
+            <MultiSelect label="Canal"        options={opts.canais}        value={form.canal_cod}        onChange={v => set('canal_cod', v)} />
             <MultiSelect label="Departamento" options={opts.departamentos} value={form.departamento_cod} onChange={v => set('departamento_cod', v)} />
             <MultiSelect label="Seção"        options={opts.secoes}        value={form.secao_cod}        onChange={v => set('secao_cod', v)} />
+            <MultiSelect label="Fornecedor"   options={opts.fornecedores}  value={form.fornecedor_cod}   onChange={v => set('fornecedor_cod', v)} />
             <MultiSelect label="Comprador"    options={opts.compradores}   value={form.comprador_cod}    onChange={v => set('comprador_cod', v)} />
           </div>
           <p className="mt-2 text-xs text-slate-400">
             Dica: filtre pelas filiais de loja (300, 302, 303, 304, 305, 360). O CD87 e o depósito 313 têm outra escala e distorcem a leitura de loja.
+          </p>
+          <p className="mt-1 text-xs text-slate-400">
+            Canal e Fornecedor não existem no arquivo de estoque — eles filtram a venda (a média passa a ser só daquele canal/fornecedor) e restringem os produtos listados.
+            Ao filtrar por canal, a cobertura fica conservadora: o estoque é físico e não se separa por canal.
           </p>
         </details>
       </section>
@@ -199,27 +254,40 @@ export function Cobertura() {
               <table className="min-w-full text-sm">
                 <thead className="bg-slate-50 text-slate-600">
                   <tr>
-                    <th className="text-left p-3">Filial</th>
-                    <th className="text-left p-3">Produto</th>
-                    <th className="text-right p-3">Vendido</th>
-                    <th className="text-right p-3">Média/dia</th>
-                    <th className="text-center p-3">Base</th>
-                    <th className="text-right p-3">Disponível</th>
-                    <th className="text-right p-3">Cobertura</th>
-                    <th className="text-center p-3">Status</th>
-                    <th className="text-right p-3">Sugestão (un)</th>
-                    <th className="text-right p-3">Custo da compra</th>
+                    <Th k="filial_cod"      sort={sort} onSort={ordenarPor} align="left">Filial</Th>
+                    <Th k="produto_nome"    sort={sort} onSort={ordenarPor} align="left">Produto</Th>
+                    <Th k="fornecedor_nome" sort={sort} onSort={ordenarPor} align="left">Fornecedor</Th>
+                    <Th k="qtd_vendida"     sort={sort} onSort={ordenarPor}>Vendido</Th>
+                    <Th k="media_diaria"    sort={sort} onSort={ordenarPor}>Média/dia</Th>
+                    <Th k="base_media"      sort={sort} onSort={ordenarPor} align="center">Base</Th>
+                    <Th k="disponivel"      sort={sort} onSort={ordenarPor}>Disponível</Th>
+                    <Th k="cobertura_dias"  sort={sort} onSort={ordenarPor}>Cobertura</Th>
+                    <Th k="status"          sort={sort} onSort={ordenarPor} align="center">Status</Th>
+                    <Th k="sugestao_compra" sort={sort} onSort={ordenarPor}>Sugestão (un)</Th>
+                    <Th k="custo_sugestao"  sort={sort} onSort={ordenarPor}>Custo da compra</Th>
                   </tr>
                 </thead>
                 <tbody>
                   {visiveis.map((r, i) => {
                     const st = STATUS[r.status] || STATUS.sem_giro;
                     return (
-                      <tr key={r.filial_cod + '-' + r.produto_cod + i} className="border-t border-slate-100 hover:bg-slate-50">
+                      <tr key={r.filial_cod + '-' + r.produto_cod + i}
+                        onClick={() => setDrill({
+                          produto_cod: r.produto_cod,
+                          produto_nome: r.produto_nome,
+                          filial_cod: r.filial_cod,
+                          fornecedor_cod: r.fornecedor_cod,
+                          fornecedor_nome: r.fornecedor_nome,
+                        })}
+                        className="border-t border-slate-100 cursor-pointer hover:bg-sky-50">
                         <td className="p-3 font-mono text-xs text-slate-500">{r.filial_cod}</td>
                         <td className="p-3 text-slate-800">
                           <span className="font-mono text-xs text-slate-500 mr-2">{r.produto_cod}</span>
                           {r.produto_nome || ''}
+                        </td>
+                        <td className="p-3 text-slate-600">
+                          {r.fornecedor_cod && <span className="font-mono text-xs text-slate-400 mr-2">{r.fornecedor_cod}</span>}
+                          <span className="text-xs">{r.fornecedor_nome || '—'}</span>
                         </td>
                         <td className="p-3 text-right">{num2(r.qtd_vendida)}</td>
                         <td className="p-3 text-right font-medium">{num2(r.media_diaria)}</td>
@@ -244,10 +312,10 @@ export function Cobertura() {
                     );
                   })}
                   {visiveis.length === 0 && !loading && (
-                    <tr><td colSpan={10} className="p-8 text-center text-slate-500">Nenhum item.</td></tr>
+                    <tr><td colSpan={11} className="p-8 text-center text-slate-500">Nenhum item.</td></tr>
                   )}
                   {loading && (
-                    <tr><td colSpan={10} className="p-8 text-center text-slate-500">Calculando...</td></tr>
+                    <tr><td colSpan={11} className="p-8 text-center text-slate-500">Calculando...</td></tr>
                   )}
                 </tbody>
               </table>
@@ -255,9 +323,14 @@ export function Cobertura() {
             <p className="mt-2 text-xs text-slate-400">
               Média/dia = quantidade vendida ÷ dias em que o produto estava disponível (quando há histórico de estoque no período);
               senão ÷ dias corridos. Sugestão = média/dia × (lead time + segurança) − disponível.
+              Clique numa linha para ver a série de venda × estoque do produto.
             </p>
           </section>
         </>
+      )}
+
+      {drill && (
+        <ProdutoDrill produto={drill} form={form} onClose={() => setDrill(null)} />
       )}
     </div>
   );
@@ -271,6 +344,23 @@ function Campo({ label, children }) {
       <span className="block text-xs font-medium text-slate-600 mb-1">{label}</span>
       {children}
     </label>
+  );
+}
+
+/** Cabeçalho ordenável: 1º clique ordena desc, 2º asc, 3º volta à ordem original. */
+function Th({ k, sort, onSort, align = 'right', children }) {
+  const ativo = sort.key === k;
+  const seta = !ativo ? '' : (sort.dir === 'desc' ? ' ↓' : ' ↑');
+  const just = align === 'left' ? 'text-left' : align === 'center' ? 'text-center' : 'text-right';
+  return (
+    <th className={`${just} p-3`}>
+      <button type="button" onClick={() => onSort(k)}
+        title="Ordenar"
+        className={'inline-flex items-center gap-0.5 hover:text-slate-900 ' +
+          (ativo ? 'text-sky-700 font-semibold' : 'text-slate-600')}>
+        {children}<span className="text-[10px]">{seta}</span>
+      </button>
+    </th>
   );
 }
 

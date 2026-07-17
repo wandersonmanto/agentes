@@ -297,9 +297,19 @@ function maestroNum(name) {
 // arquivo intradia (carregado várias vezes ao dia): "maestro_dia.xlsx"
 const isIntraday = (name) => /maestro[_-]?dia/i.test(name);
 
+// Atualiza o cache de valores distintos das dimensões (usado pelos selects
+// de filtro). Feito 1x ao final da carga, não a cada arquivo.
+async function atualizarCacheDim() {
+  if (dryRun || !supabase) return;
+  process.stdout.write('▸ Atualizando cache de filtros (fn_vendas_dim_refresh)... ');
+  const { error } = await supabase.rpc('fn_vendas_dim_refresh');
+  console.log(error ? `FALHOU (${error.message})` : 'ok');
+}
+
 if (!inputIsDir) {
   const res = await ingestFile(inputPath, { batchSize, dryRun });
   if (!res.ok) { console.error(`\nFalhou: ${res.msg}`); process.exit(1); }
+  await atualizarCacheDim();
 } else {
   const todos = fs.readdirSync(inputPath)
     .filter(n => /\.xlsx$/i.test(n))
@@ -360,5 +370,6 @@ if (!inputIsDir) {
   console.log(`Total: ${okCount} ok, ${failCount} falhou em ${((Date.now() - tInicio) / 1000).toFixed(1)}s`);
   console.log(`       ${fmt(totIns)} novos, ${fmt(totUpd)} atualizados, ${fmt(totRem)} órfãos removidos`);
   if (falhas.length) { console.log('\nFalhas:'); falhas.forEach(f => console.log(`  ${f.name} → ${f.msg}`)); }
+  if (okCount > 0) await atualizarCacheDim();
   if (failCount > 0) process.exit(2);
 }
